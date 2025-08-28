@@ -1,0 +1,33 @@
+# Created by venv; see https://docs.python.org/3/library/venv.html
+
+venv/
+.env/
+ENV/
+
+*.db
+*.sqlite
+*.sqlite3
+
+__pycache__/
+*.py[cod]
+*$py.class
+
+config.py
+
+# Файлы IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+*.log
+*.tmp
+*.temp
+
+.DS_Store
+Thumbs.db
+
+build/
+dist/
+*.egg-info/
+"config.py" 
