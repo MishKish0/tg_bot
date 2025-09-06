@@ -5,6 +5,7 @@ import time
 import telebot
 from telebot import types
 from apscheduler.schedulers.background import BackgroundScheduler
+import requests
 import config
 
 bot = telebot.TeleBot(config.BOT_TOKEN)
@@ -15,9 +16,11 @@ def init_db():
     with sql.connect(config.DB_NAME) as con:
         c = con.cursor()
         c.execute("""CREATE TABLE IF NOT EXISTS birthdays (
-        user_id INTEGER PRIMARY KEY,
-        user TEXT,
-        birthday_date TEXT
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            birthday_date TEXT NOT NULL,
+            chat_id INTEGER,
+            FOREIGN KEY (chat_id) REFERENCES chats (chat_id) ON DELETE CASCADE
         )""")
         
         c.execute("""CREATE TABLE IF NOT EXISTS photo (
@@ -32,17 +35,19 @@ def init_db():
             is_active INTEGER DEFAULT 1,
             mailing_time TEXT DEFAULT "09:00"
         )""")
-        
-        c.execute("""CREATE TABLE IF NOT EXISTS user_chats (
-            user_id INTEGER,
-            chat_id INTEGER,
-            username TEXT,
-            first_name TEXT,
-            last_name TEXT,
-            PRIMARY KEY (user_id, chat_id)
-        )""")
 
 init_db()
+
+def get_random_cat():
+    try:
+        response = requests.get('https://api.thecatapi.com/v1/images/search')
+        if response.status_code == 200:
+            return response.json()[0]['url']
+        else:
+            return None
+    except Exception as e:
+        print(f"Ошибка при загрузке котика: {e}")
+        return None
 
 def add_chat(chat_id, title, mailing_time="09:00"):
     with sql.connect(config.DB_NAME) as con:
@@ -72,39 +77,13 @@ def get_random_photo():
     except Exception as e:
         print(f"Ошибка при получении фото: {e}")
 
-def update_user_chat_info(chat_id, user_id, username, first_name, last_name):
-    with sql.connect(config.DB_NAME) as con:
-        c = con.cursor()
-        c.execute("""INSERT OR REPLACE INTO user_chats 
-                    (user_id, chat_id, username, first_name, last_name) 
-                    VALUES (?, ?, ?, ?, ?)""",
-                 (user_id, chat_id, username, first_name, last_name))
-
-def update_chat_members():
-    try:
-        with sql.connect(config.DB_NAME) as con:
-            c = con.cursor()
-            c.execute("SELECT chat_id FROM chats WHERE is_active = 1")
-            active_chats = [row[0] for row in c.fetchall()]
-            
-            for chat_id in active_chats:
-                try:
-                    admins = bot.get_chat_administrators(chat_id)
-                    
-                    for admin in admins:
-                        user = admin.user
-                        update_user_chat_info(chat_id, user.id, user.username, user.first_name, user.last_name)
-                        
-                    print(f"Обновлена информация об администраторах чата {chat_id}")
-                except Exception as e:
-                    print(f"Ошибка при обновлении участников чата {chat_id}: {e}")
-    except Exception as e:
-        print(f"Ошибка при обновлении списка участников: {e}")
-
 def morning_mailing():
     try:
         today = datetime.now().strftime("%d-%m")
         random_photo = get_random_photo()
+        if not random_photo:
+            random_photo = get_random_cat()
+        
         chat_ids = get_chats_for_mailing()
         
         if not chat_ids:
@@ -114,23 +93,27 @@ def morning_mailing():
             try:
                 with sql.connect(config.DB_NAME) as con:
                     c = con.cursor()
-                    c.execute("""SELECT DISTINCT b.user 
-                                FROM birthdays b
-                                JOIN user_chats uc ON b.user_id = uc.user_id
-                                WHERE substr(b.birthday_date, 1, 5) = ?
-                                AND uc.chat_id = ?""", (today, chat_id))
+                    c.execute("SELECT name FROM birthdays WHERE substr(birthday_date, 1, 5) = ? AND chat_id = ?", (today, chat_id))
                     birthdays = [row[0] for row in c.fetchall()]
                 
                 if birthdays:
-                    message = "Сегодня день рождения у:\n"
-                    for user in birthdays:
-                        message += f"@{user}\n"
-                    message += "Поздравляем!"
+                    if len(birthdays) == 1:
+                        message = f"Сегодня {birthdays[0]} празднует день рождения! 😺🎉\nПоздравляем!"
+                    elif len(birthdays) == 2:
+                        message = f"Сегодня {birthdays[0]} и {birthdays[1]} празднуют день рождения! 😺🎉\nПоздравляем!🥳"
+                    else:
+                        message = "Сегодня дни рождения у:\n"
+                        for name in birthdays:
+                            message += f"🎂 {name}\n"
+                        message += "Поздравляем всех именинников!😺🎉"
                 else:
-                    message = "Доброе утро!"
+                    message = "Доброе утро!😺"
                 
                 if random_photo:
-                    bot.send_photo(chat_id, random_photo, caption=message)
+                    if isinstance(random_photo, str) and random_photo.startswith('http'):
+                        bot.send_photo(chat_id, random_photo, caption=message)
+                    else:
+                        bot.send_photo(chat_id, random_photo, caption=message)
                 else:
                     bot.send_message(chat_id, message)
             except Exception as e:
@@ -141,7 +124,6 @@ def morning_mailing():
 def run_scheduler():
     scheduler = BackgroundScheduler()
     scheduler.add_job(morning_mailing, 'cron', minute='*')
-    scheduler.add_job(update_chat_members, 'cron', hour=3)
     scheduler.start()
     
     try:
@@ -154,28 +136,6 @@ scheduler_thread = Thread(target=run_scheduler)
 scheduler_thread.daemon = True
 scheduler_thread.start()
 
-def form_birth(message):
-    user_id = message.from_user.id
-    try:
-        birth_date = datetime.strptime(message.text, config.DATE_FORMAT)
-        formatted_date = birth_date.strftime(config.DATE_FORMAT)
-        with sql.connect(config.DB_NAME) as con:
-            c = con.cursor()
-            c.execute("UPDATE birthdays SET birthday_date = ? WHERE user_id = ?", (formatted_date, user_id))
-        bot.send_message(message.chat.id, "Дата рождения успешно добавлена")
-        if user_id in user_states:
-            del user_states[user_id]
-    except ValueError:
-        error_msg = f"Неверный формат даты. Пожалуйста, используйте формат: {config.DATE_FORMAT.replace('%d', 'ДД').replace('%m', 'ММ').replace('%Y', 'ГГГГ')}"
-        bot.send_message(message.chat.id, error_msg)
-        msg = bot.send_message(message.chat.id, "Попробуйте еще раз:")
-        bot.register_next_step_handler(msg, form_birth)
-    except Exception as e:
-        error_msg = f"Произошла ошибка: {str(e)}"
-        bot.send_message(message.chat.id, error_msg)
-        if user_id in user_states:
-            del user_states[user_id] 
-      
 def get_photo(message):
     request = message.text
     user_id = message.from_user.id
@@ -203,28 +163,8 @@ def get_photo(message):
 def main(message):
     bot.send_message(message.chat.id, f"Привет, {message.from_user.first_name}!")
     
-@bot.message_handler(commands=["set_birthday"], chat_types=['private'])
-def set_birthday(message):
-    user_id = message.from_user.id
-    name = message.from_user.username or "Null"
-    
-    with sql.connect(config.DB_NAME) as con:
-        c = con.cursor()
-        c.execute("INSERT OR REPLACE INTO birthdays (user_id, user) VALUES (?, ?)", (user_id, name))
-    
-    user_states[user_id] = "waiting_birthday"
-    msg = bot.send_message(message.chat.id, f"Введите дату рождения в формате {config.DATE_FORMAT.replace('%d', 'ДД').replace('%m', 'ММ').replace('%Y', 'ГГГГ')}")
-    bot.register_next_step_handler(msg, form_birth)
-  
-@bot.callback_query_handler(func=lambda callback: True)
-def callback_message(callback):
-    if callback.data == "add_birthday":
-        user_states[callback.from_user.id] = "waiting_birthday"
-        msg = bot.send_message(callback.message.chat.id, f"Введите дату рождения в формате {config.DATE_FORMAT.replace('%d', 'ДД').replace('%m', 'ММ').replace('%Y', 'ГГГГ')}")
-        bot.register_next_step_handler(msg, form_birth)
-        
 @bot.message_handler(commands=["add_photo"], chat_types=['private'])
-def add_photo(message):
+def add_photo_command(message):
     if message.from_user.id in admin_ids:
         user_states[message.from_user.id] = "waiting_photo"
         msg = bot.send_message(message.chat.id, "Загрузите фото и добавьте к нему подпись (необязательно)")
@@ -264,7 +204,7 @@ def cancel(message):
     user_id = message.from_user.id
     if user_id in user_states:
         del user_states[user_id]
-        bot.send_message(message.chat.id, "Текущее действие отменено.")
+        bot.send_message(message.chat.id, "Текущее действия отменено.")
     else:
         bot.send_message(message.chat.id, "Нет активных действий для отмены.")
 
@@ -306,9 +246,9 @@ def set_mailing_time(message):
                     update_chat_mailing_time(chat_id, mailing_time)
                     bot.reply_to(message, f"Время рассылки для чата {chat_id} установлено на {mailing_time}")
                 except ValueError:
-                    bot.reply_to(message, f"Неверный формат времени. Используйте {config.TIME_FORMAT.replace('%H:%M', 'ЧЧ:MM')}")
+                    bot.reply_to(message, f"Неверный формат времени. Используйте {config.TIME_FORMAT}")
             else:
-                bot.reply_to(message, "Используйте: /set_mailing_time <chat_id> <время в формате ЧЧ:MM>")
+                bot.reply_to(message, f"Используйте: /set_mailing_time <chat_id> <время в формате {config.TIME_FORMAT}>")
         except ValueError:
             bot.reply_to(message, "Неверный формат ID чата.")
         except Exception as e:
@@ -316,98 +256,134 @@ def set_mailing_time(message):
     else:
         bot.reply_to(message, "Недостаточно прав")
 
-@bot.message_handler(commands=["update_members"], chat_types=['group', 'supergroup'])
-def update_members_command(message):
-    if message.from_user.id not in admin_ids:
-        bot.reply_to(message, "Эта команда доступна только администраторам бота.")
-        return
-        
-    chat_id = message.chat.id
-    try:
-        admins = bot.get_chat_administrators(chat_id)
-        for admin in admins:
-            user = admin.user
-            update_user_chat_info(chat_id, user.id, user.username, user.first_name, user.last_name)
-        
-        bot.reply_to(message, f"Информация об администраторах чата обновлена. Добавлено/обновлено {len(admins)} записей.")
-    except Exception as e:
-        bot.reply_to(message, f"Ошибка при обновлении информации: {str(e)}")
-
 @bot.message_handler(commands=["get_chat_id"])
 def get_chat_id(message):
     chat_id = message.chat.id
     title = message.chat.title
     bot.reply_to(message, f"Вот ID чата({title}): {chat_id}")
 
-@bot.message_handler(content_types=['text'], chat_types=['group', 'supergroup'])
-def handle_group_messages(message):
-    user_id = message.from_user.id
-    username = message.from_user.username
-    first_name = message.from_user.first_name
-    last_name = message.from_user.last_name
-    chat_id = message.chat.id
-    
-    update_user_chat_info(chat_id, user_id, username, first_name, last_name)
-
 @bot.message_handler(content_types=['new_chat_members'], chat_types=['group', 'supergroup'])
 def handle_new_members(message):
     for new_member in message.new_chat_members:
-        if not new_member.is_bot:
-            user_id = new_member.id
-            username = new_member.username
-            first_name = new_member.first_name
-            last_name = new_member.last_name
-            chat_id = message.chat.id
-            
-            update_user_chat_info(chat_id, user_id, username, first_name, last_name)
-            
-            if new_member.id == bot.get_me().id:
-                welcome_text = (
-                    "Привет! Я бот для утренних рассылок и поздравлений с днем рождения.\n\n"
-                    "Чтобы я мог вас поздравить, пожалуйста:\n"
-                    "1. Напишите любое сообщение в этот чат\n"
-                    "2. Установите свою дату рождения с помощью команды /set_birthday в личных сообщениях со мной\n\n"
-                    "Администраторы могут настроить время рассылки с помощью /set_mailing_time"
-                )
-                bot.send_message(message.chat.id, welcome_text)
+        if new_member.id == bot.get_me().id:
+            welcome_text = (
+                "Привет! Я бот для утренних рассылок и поздравлений с днем рождения.\n\n"
+                "Администраторы бота могут настроить время рассылки с помощью /set_mailing_time"
+            )
+            bot.send_message(message.chat.id, welcome_text)
 
-@bot.message_handler(commands=["admin_add_birthday"], chat_types=['private'])
-def admin_add_birthday(message):
+@bot.message_handler(commands=["add_birthday"], chat_types=['group', 'supergroup', 'private'])
+def add_birthday_command(message):
+    if message.from_user.id not in admin_ids:
+        bot.reply_to(message, "Недостаточно прав")
+        return
+        
+    try:
+        if message.chat.type in ['group', 'supergroup']:
+            chat_id = message.chat.id
+            parts = message.text.split(maxsplit=2)
+            if len(parts) < 3:
+                bot.reply_to(message, f"Используйте: /add_birthday {config.DATE_FORMAT.replace('%', '')} Имя Фамилия")
+                return
+            date_str = parts[1]
+            name = parts[2]
+        else:
+            parts = message.text.split(maxsplit=3)
+            if len(parts) < 4:
+                bot.reply_to(message, f"Используйте: /add_birthday chat_id {config.DATE_FORMAT.replace('%', '')} Имя Фамилия")
+                return
+            try:
+                chat_id = int(parts[1])
+            except ValueError:
+                bot.reply_to(message, "Неверный формат chat_id. Используйте целое число.")
+                return
+            date_str = parts[2]
+            name = parts[3]
+        
+        try:
+            birth_date = datetime.strptime(date_str, config.DATE_FORMAT)
+            formatted_date = birth_date.strftime(config.DATE_FORMAT)
+        except ValueError:
+            bot.reply_to(message, f"Неверный формат даты. Используйте: {config.DATE_FORMAT.replace('%', '')}")
+            return
+            
+        with sql.connect(config.DB_NAME) as con:
+            c = con.cursor()
+            c.execute("SELECT 1 FROM chats WHERE chat_id = ?", (chat_id,))
+            if not c.fetchone():
+                bot.reply_to(message, f"Чат с ID {chat_id} не найден в базе. Сначала добавьте чат с помощью /add_chat")
+                return
+            
+        with sql.connect(config.DB_NAME) as con:
+            c = con.cursor()
+            c.execute("INSERT INTO birthdays (name, birthday_date, chat_id) VALUES (?, ?, ?)",
+                     (name, formatted_date, chat_id))
+                     
+        bot.reply_to(message, f"День рождения для {name} установлен на {formatted_date} в чате {chat_id}")
+            
+    except Exception as e:
+        bot.reply_to(message, f"Произошла ошибка: {str(e)}")
+
+@bot.message_handler(commands=["remove_birthday"], chat_types=['private'])
+def remove_birthday_command(message):
+    if message.from_user.id not in admin_ids:
+        bot.reply_to(message, "Недостаточно прав")
+        return  
+    try:
+        parts = message.text.split(maxsplit=2)
+        if len(parts) < 3:
+            bot.reply_to(message, "Используйте: /remove_birthday chat_id Имя Фамилия")
+            return
+        try:
+            chat_id = int(parts[1])
+        except ValueError:
+            bot.reply_to(message, "Неверный формат chat_id. Используйте целое число.")
+            return
+        name = parts[2]
+        
+        with sql.connect(config.DB_NAME) as con:
+            c = con.cursor()
+            c.execute("DELETE FROM birthdays WHERE name = ? AND chat_id = ?", (name, chat_id))
+            
+            if c.rowcount > 0:
+                bot.reply_to(message, f"День рождения для {name} в чате {chat_id} удален")
+            else:
+                bot.reply_to(message, f"День рождения для {name} в чате {chat_id} не найден")
+            
+    except Exception as e:
+        bot.reply_to(message, f"Произошла ошибка: {str(e)}")
+
+@bot.message_handler(commands=["list_birthdays"], chat_types=['private'])
+def list_birthdays_command(message):
     if message.from_user.id not in admin_ids:
         bot.reply_to(message, "Недостаточно прав")
         return
         
     try:
         parts = message.text.split()
-        if len(parts) != 3:
-            bot.reply_to(message, "Используйте: /admin_add_birthday @username DD.MM.YYYY")
+        if len(parts) < 2:
+            bot.reply_to(message, "Используйте: /list_birthdays chat_id")
             return
-            
-        username = parts[1].replace('@', '')
-        birth_date_str = parts[2]
-        
         try:
-            birth_date = datetime.strptime(birth_date_str, config.DATE_FORMAT)
-            formatted_date = birth_date.strftime(config.DATE_FORMAT)
+            chat_id = int(parts[1])
         except ValueError:
-            bot.reply_to(message, f"Неверный формат даты. Используйте: {config.DATE_FORMAT}")
+            bot.reply_to(message, "Неверный формат chat_id. Используйте целое число.")
             return
-            
+        
         with sql.connect(config.DB_NAME) as con:
             c = con.cursor()
-            c.execute("SELECT user_id FROM user_chats WHERE username = ? LIMIT 1", (username,))
-            result = c.fetchone()
+            c.execute("SELECT name, birthday_date FROM birthdays WHERE chat_id = ? ORDER BY birthday_date", (chat_id,))
+            birthdays = c.fetchall()
             
-            if not result:
-                bot.reply_to(message, f"Пользователь @{username} не найден в базе. Он должен хотя бы раз написать в чате, где есть бот.")
+            if not birthdays:
+                bot.reply_to(message, f"В чате {chat_id} нет дней рождения")
                 return
                 
-            user_id = result[0]
-            
-            c.execute("INSERT OR REPLACE INTO birthdays (user_id, user, birthday_date) VALUES (?, ?, ?)",
-                     (user_id, username, formatted_date))
-                     
-            bot.reply_to(message, f"День рождения для @{username} установлен на {formatted_date}")
+            message_text = f"Список дней рождения в чате {chat_id}:\n\n"
+            for name, date in birthdays:
+                message_text += f"{name} - {date}\n"
+                
+            bot.reply_to(message, message_text)
             
     except Exception as e:
         bot.reply_to(message, f"Произошла ошибка: {str(e)}")
@@ -419,9 +395,7 @@ def handle_all_messages(message):
         return
     if user_id in user_states:
         state = user_states[user_id]
-        if state == "waiting_birthday":
-            form_birth(message)
-        elif state == "waiting_photo":
+        if state == "waiting_photo":
             bot.send_message(message.chat.id, "Пожалуйста, загрузите изображение, а не текст")
         elif state == "waiting_get_photo":
             get_photo(message)
