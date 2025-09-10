@@ -35,8 +35,19 @@ def init_db():
             is_active INTEGER DEFAULT 1,
             mailing_time TEXT DEFAULT "09:00"
         )""")
+        
 
 init_db()
+
+def delete_message(chat_id, message_id, delay=5):
+    def delete():
+        time.sleep(delay)
+        try:
+            bot.delete_message(chat_id, message_id)
+        except Exception as e:
+            print(f"Ошибка при удалении сообщения: {e}")
+    
+    Thread(target=delete).start()
 
 def get_random_cat():
     try:
@@ -111,7 +122,8 @@ def morning_mailing():
                 
                 if random_photo:
                     if isinstance(random_photo, str) and random_photo.startswith('http'):
-                        bot.send_photo(chat_id, random_photo, caption=message)
+                        msg = bot.send_photo(chat_id, random_photo, caption=message)
+                        delete_message(chat_id, msg.message_id, 86400)
                     else:
                         bot.send_photo(chat_id, random_photo, caption=message)
                 else:
@@ -161,7 +173,9 @@ def get_photo(message):
         
 @bot.message_handler(commands=["start"], chat_types=['private'])
 def main(message):
-    bot.send_message(message.chat.id, f"Привет, {message.from_user.first_name}!")
+     msg = bot.send_message(message.chat.id, f"Привет, {message.from_user.first_name}!")
+     delete_message(message.chat.id, msg.message_id, 10)
+     delete_message(message.chat.id, message.message_id, 10)
     
 @bot.message_handler(commands=["add_photo"], chat_types=['private'])
 def add_photo_command(message):
@@ -204,9 +218,13 @@ def cancel(message):
     user_id = message.from_user.id
     if user_id in user_states:
         del user_states[user_id]
-        bot.send_message(message.chat.id, "Текущее действия отменено.")
+        msg = bot.send_message(message.chat.id, "Текущее действия отменено.")
+        delete_message(message.chat.id, msg.message_id, 10)
+        delete_message(message.chat.id, message.message_id, 10)
     else:
         bot.send_message(message.chat.id, "Нет активных действий для отмены.")
+        delete_message(message.chat.id, msg.message_id, 10)
+        delete_message(message.chat.id, message.message_id, 10)
 
 @bot.message_handler(commands=["add_chat"], chat_types=['private'])
 def add_chat_command(message):
@@ -260,7 +278,9 @@ def set_mailing_time(message):
 def get_chat_id(message):
     chat_id = message.chat.id
     title = message.chat.title
-    bot.reply_to(message, f"Вот ID чата({title}): {chat_id}")
+    msg = bot.reply_to(message, f"Вот ID чата({title}): {chat_id}")
+    delete_message(message.chat.id, msg.message_id, 60)
+    delete_message(message.chat.id, message.message_id, 60)
 
 @bot.message_handler(content_types=['new_chat_members'], chat_types=['group', 'supergroup'])
 def handle_new_members(message):
